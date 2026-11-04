@@ -1,4 +1,14 @@
-from sqlalchemy import CheckConstraint, Column, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    text,
+)
 
 from app.database import Base
 
@@ -47,6 +57,9 @@ class HubResource(Base):
     hub_id = Column(String, ForeignKey("MOBILITY_HUB.hub_id"), nullable=False)
     code = Column(String, nullable=False)
     resource_type = Column(String, CheckConstraint("resource_type IN ('PARKING_SPACE','CHARGING_POINT')"))
+    __table_args__ = (
+        Index("idx_hub_resource_hub", "hub_id", "resource_type"),
+    )
 
 
 class Vehicle(Base):
@@ -56,8 +69,15 @@ class Vehicle(Base):
     current_hub_id = Column(String, ForeignKey("MOBILITY_HUB.hub_id"))
     vehicle_type = Column(String)
     ownership_type = Column(String, CheckConstraint("ownership_type IN ('PUBLIC','PRIVATE')"))
-    battery_pct = Column(Float)
-    status = Column(String)
+    battery_pct = Column(Float, CheckConstraint("battery_pct >= 0.0 AND battery_pct <= 100.0"))
+    status = Column(
+        String,
+        CheckConstraint("status IN ('AVAILABLE','RESERVED','IN_USE','MAINTENANCE','IN_TRANSIT','CHARGING')"),
+    )
+    __table_args__ = (
+        Index("idx_vehicle_hub_status", "current_hub_id", "status", "ownership_type"),
+        Index("idx_vehicle_battery", "battery_pct"),
+    )
 
 
 class StudentProfile(Base):
@@ -75,7 +95,14 @@ class Trip(Base):
     origin_hub_id = Column(String, ForeignKey("MOBILITY_HUB.hub_id"), nullable=False)
     destination_hub_id = Column(String, ForeignKey("MOBILITY_HUB.hub_id"), nullable=False)
     planned_departure = Column(String)
-    status = Column(String)
+    status = Column(
+        String,
+        CheckConstraint("status IN ('PLANNED','IN_PROGRESS','COMPLETED','CANCELLED')"),
+    )
+    __table_args__ = (
+        Index("idx_trip_student_status", "student_id", "status"),
+        Index("idx_trip_origin_dest", "origin_hub_id", "destination_hub_id"),
+    )
 
 
 class VehicleReservation(Base):
@@ -87,7 +114,30 @@ class VehicleReservation(Base):
     reserved_at = Column(String, nullable=False)
     planned_start_at = Column(String)
     pickup_deadline_at = Column(String)
-    status = Column(String)
+    status = Column(
+        String,
+        CheckConstraint("status IN ('CONFIRMED','PENDING','RESERVED','COMPLETED','CANCELLED','EXPIRED')"),
+    )
+    __table_args__ = (
+        Index(
+            "idx_active_vehicle_res",
+            "vehicle_id",
+            unique=True,
+            sqlite_where=text("status IN ('CONFIRMED', 'PENDING', 'RESERVED')"),
+            postgresql_where=text("status IN ('CONFIRMED', 'PENDING', 'RESERVED')"),
+        ),
+        Index(
+            "idx_active_student_res",
+            "student_id",
+            unique=True,
+            sqlite_where=text("status IN ('CONFIRMED', 'PENDING', 'RESERVED')"),
+            postgresql_where=text("status IN ('CONFIRMED', 'PENDING', 'RESERVED')"),
+        ),
+        Index("idx_reservation_vehicle_status", "vehicle_id", "status"),
+        Index("idx_reservation_student_status", "student_id", "status"),
+        Index("idx_reservation_trip", "trip_id"),
+        Index("idx_reservation_deadline", "pickup_deadline_at"),
+    )
 
 
 class Rental(Base):
@@ -99,7 +149,16 @@ class Rental(Base):
     picked_up_at = Column(String)
     returned_at = Column(String)
     return_condition = Column(String)
-    status = Column(String)
+    status = Column(
+        String,
+        CheckConstraint("status IN ('ACTIVE','COMPLETED','DISPUTED')"),
+    )
+    __table_args__ = (
+        Index("idx_rental_reservation", "reservation_id"),
+        Index("idx_rental_origin_hub", "origin_hub_id"),
+        Index("idx_rental_return_hub", "return_hub_id"),
+        Index("idx_rental_status", "status"),
+    )
 
 
 class ParkingSpace(Base):
@@ -116,7 +175,14 @@ class ParkingReservation(Base):
     parking_space_id = Column(String, ForeignKey("PARKING_SPACE.resource_id"), nullable=False)
     starts_at = Column(String)
     ends_at = Column(String)
-    status = Column(String)
+    status = Column(
+        String,
+        CheckConstraint("status IN ('RESERVED','CHECKED_IN','COMPLETED','CANCELLED','NOSHOW','OVERDUE')"),
+    )
+    __table_args__ = (
+        Index("idx_parking_res_space", "parking_space_id", "status"),
+        Index("idx_parking_res_user", "user_id", "status"),
+    )
 
 
 class ParkingSession(Base):
@@ -148,7 +214,14 @@ class ChargingSession(Base):
     priority_score = Column(Integer)
     scheduled_start_time = Column(String)
     actual_start_time = Column(String)
-    status = Column(String)
+    status = Column(
+        String,
+        CheckConstraint("status IN ('SUBMITTED','QUEUED','CHARGING','COMPLETED','CANCELLED','INTERRUPTED','FAILED')"),
+    )
+    __table_args__ = (
+        Index("idx_charging_session_point", "charging_point_id", "status"),
+        Index("idx_charging_session_user", "user_id", "status"),
+    )
 
 
 class ChargingPolicy(Base):
@@ -190,6 +263,8 @@ class SensorTelemetry(Base):
             "(vehicle_id IS NULL AND resource_id IS NOT NULL)",
             name="chk_telemetry_fks",
         ),
+        Index("idx_telemetry_vehicle_ts", "vehicle_id", "timestamp"),
+        Index("idx_telemetry_resource_ts", "resource_id", "timestamp"),
     )
 
 
@@ -204,11 +279,17 @@ class OperationalIncident(Base):
     incident_type = Column(String)
     severity = Column(String)
     description = Column(String)
-    status = Column(String)
+    status = Column(
+        String,
+        CheckConstraint("status IN ('OPEN','IN_PROGRESS','RESOLVED','CLOSED')"),
+    )
     opened_at = Column(String, nullable=False)
     closed_at = Column(String)
     __table_args__ = (
         CheckConstraint("vehicle_id IS NOT NULL OR resource_id IS NOT NULL", name="chk_incident_assets"),
+        Index("idx_incident_hub_status", "hub_id", "status"),
+        Index("idx_incident_vehicle", "vehicle_id"),
+        Index("idx_incident_resource", "resource_id"),
     )
 
 
@@ -245,4 +326,11 @@ class RedistributionTask(Base):
     to_hub_id = Column(String, ForeignKey("MOBILITY_HUB.hub_id"), nullable=False)
     created_by_user_id = Column(String, ForeignKey("USER.user_id"), nullable=False)
     priority = Column(Integer)
-    status = Column(String)
+    status = Column(
+        String,
+        CheckConstraint("status IN ('PENDING','IN_TRANSIT','COMPLETED','FAILED','CANCELLED')"),
+    )
+    __table_args__ = (
+        Index("idx_redist_task_status", "status"),
+        Index("idx_redist_task_vehicle", "vehicle_id"),
+    )

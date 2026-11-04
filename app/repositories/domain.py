@@ -8,37 +8,25 @@ from app.models.entities import (
     ParkingReservation,
     ParkingSession,
     ParkingSpace,
-    PrivateVehicle,
-    PublicVehicle,
     RedistributionTask,
-    Rental,
-    SensorTelemetry,
-    SimulationRun,
-    Trip,
     Role,
+    SimulationRun,
     StudentProfile,
     User,
     UserRole,
-    Vehicle,
-    VehicleReservation,
 )
 from app.repositories.base import BaseRepository
-
-
-class VehicleRepository(BaseRepository[Vehicle]):
-    model = Vehicle
-
-
-class PrivateVehicleRepository(BaseRepository[PrivateVehicle]):
-    model = PrivateVehicle
-
-
-class PublicVehicleRepository(BaseRepository[PublicVehicle]):
-    model = PublicVehicle
-
-
-class SensorTelemetryRepository(BaseRepository[SensorTelemetry]):
-    model = SensorTelemetry
+from app.repositories.fleet import (
+    PrivateVehicleRepository,
+    PublicVehicleRepository,
+    SensorTelemetryRepository,
+    VehicleRepository,
+)
+from app.repositories.rental import (
+    RentalRepository,
+    TripRepository,
+    VehicleReservationRepository,
+)
 
 
 class MobilityHubRepository(BaseRepository[MobilityHub]):
@@ -67,18 +55,6 @@ class ChargingSessionRepository(BaseRepository[ChargingSession]):
 
 class ChargingPointRepository(BaseRepository[ChargingPoint]):
     model = ChargingPoint
-
-
-class RentalRepository(BaseRepository[Rental]):
-    model = Rental
-
-
-class TripRepository(BaseRepository[Trip]):
-    model = Trip
-
-
-class VehicleReservationRepository(BaseRepository[VehicleReservation]):
-    model = VehicleReservation
 
 
 class OperationalIncidentRepository(BaseRepository[OperationalIncident]):
@@ -111,3 +87,29 @@ class UserRoleRepository(BaseRepository[UserRole]):
 
 class StudentProfileRepository(BaseRepository[StudentProfile]):
     model = StudentProfile
+
+
+__all__ = [
+    "VehicleRepository",
+    "PrivateVehicleRepository",
+    "PublicVehicleRepository",
+    "SensorTelemetryRepository",
+    "RentalRepository",
+    "TripRepository",
+    "VehicleReservationRepository",
+    "MobilityHubRepository",
+    "HubResourceRepository",
+    "ParkingReservationRepository",
+    "ParkingSessionRepository",
+    "ParkingSpaceRepository",
+    "ChargingSessionRepository",
+    "ChargingPointRepository",
+    "OperationalIncidentRepository",
+    "SimulationRunRepository",
+    "CoordinationRecommendationRepository",
+    "RedistributionTaskRepository",
+    "UserRepository",
+    "RoleRepository",
+    "UserRoleRepository",
+    "StudentProfileRepository",
+]

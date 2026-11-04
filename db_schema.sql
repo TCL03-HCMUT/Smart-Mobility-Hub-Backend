@@ -55,7 +55,7 @@ CREATE TABLE TRIP (
     origin_hub_id TEXT NOT NULL,
     destination_hub_id TEXT NOT NULL,
     planned_departure TEXT, -- TIMESTAMP
-    status TEXT,
+    status TEXT CHECK(status IN ('PLANNED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED')),
     FOREIGN KEY (student_id) REFERENCES "USER"(user_id),
     FOREIGN KEY (origin_hub_id) REFERENCES MOBILITY_HUB(hub_id),
     FOREIGN KEY (destination_hub_id) REFERENCES MOBILITY_HUB(hub_id)
@@ -69,7 +69,7 @@ CREATE TABLE VEHICLE_RESERVATION (
     reserved_at TEXT NOT NULL, -- TIMESTAMP
     planned_start_at TEXT, -- TIMESTAMP
     pickup_deadline_at TEXT, -- TIMESTAMP
-    status TEXT,
+    status TEXT CHECK(status IN ('CONFIRMED', 'PENDING', 'RESERVED', 'COMPLETED', 'CANCELLED', 'EXPIRED')),
     FOREIGN KEY (trip_id) REFERENCES TRIP(trip_id),
     FOREIGN KEY (student_id) REFERENCES "USER"(user_id),
     FOREIGN KEY (vehicle_id) REFERENCES VEHICLE(vehicle_id)
@@ -83,7 +83,7 @@ CREATE TABLE RENTAL (
     picked_up_at TEXT, -- TIMESTAMP
     returned_at TEXT, -- TIMESTAMP
     return_condition TEXT,
-    status TEXT,
+    status TEXT CHECK(status IN ('ACTIVE', 'COMPLETED', 'DISPUTED')),
     FOREIGN KEY (reservation_id) REFERENCES VEHICLE_RESERVATION(reservation_id),
     FOREIGN KEY (origin_hub_id) REFERENCES MOBILITY_HUB(hub_id),
     FOREIGN KEY (return_hub_id) REFERENCES MOBILITY_HUB(hub_id)
@@ -103,7 +103,7 @@ CREATE TABLE PARKING_RESERVATION (
     parking_space_id TEXT NOT NULL,
     starts_at TEXT, -- TIMESTAMP
     ends_at TEXT, -- TIMESTAMP
-    status TEXT,
+    status TEXT CHECK(status IN ('RESERVED', 'CHECKED_IN', 'COMPLETED', 'CANCELLED', 'NOSHOW', 'OVERDUE')),
     FOREIGN KEY (user_id) REFERENCES "USER"(user_id),
     FOREIGN KEY (vehicle_id) REFERENCES VEHICLE(vehicle_id),
     FOREIGN KEY (parking_space_id) REFERENCES PARKING_SPACE(resource_id)
@@ -141,7 +141,7 @@ CREATE TABLE CHARGING_SESSION (
     priority_score INTEGER,
     scheduled_start_time TEXT, -- TIMESTAMP
     actual_start_time TEXT, -- TIMESTAMP
-    status TEXT,
+    status TEXT CHECK(status IN ('SUBMITTED', 'QUEUED', 'CHARGING', 'COMPLETED', 'CANCELLED', 'INTERRUPTED', 'FAILED')),
     FOREIGN KEY (user_id) REFERENCES "USER"(user_id),
     FOREIGN KEY (vehicle_id) REFERENCES VEHICLE(vehicle_id),
     FOREIGN KEY (charging_point_id) REFERENCES CHARGING_POINT(resource_id)
@@ -165,8 +165,8 @@ CREATE TABLE VEHICLE (
     current_hub_id TEXT, -- NULLABLE (might be in transit)
     vehicle_type TEXT,
     ownership_type TEXT CHECK(ownership_type IN ('PUBLIC', 'PRIVATE')),
-    battery_pct REAL,
-    status TEXT,
+    battery_pct REAL CHECK(battery_pct >= 0.0 AND battery_pct <= 100.0),
+    status TEXT CHECK(status IN ('AVAILABLE', 'RESERVED', 'IN_USE', 'MAINTENANCE', 'IN_TRANSIT', 'CHARGING')),
     FOREIGN KEY (current_hub_id) REFERENCES MOBILITY_HUB(hub_id)
 );
 
@@ -213,7 +213,7 @@ CREATE TABLE OPERATIONAL_INCIDENT (
     incident_type TEXT,
     severity TEXT,
     description TEXT,
-    status TEXT,
+    status TEXT CHECK(status IN ('OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED')),
     opened_at TEXT NOT NULL, -- TIMESTAMP
     closed_at TEXT, -- TIMESTAMP
     FOREIGN KEY (hub_id) REFERENCES MOBILITY_HUB(hub_id),
@@ -221,7 +221,7 @@ CREATE TABLE OPERATIONAL_INCIDENT (
     FOREIGN KEY (resource_id) REFERENCES HUB_RESOURCE(resource_id),
     FOREIGN KEY (reported_by_user_id) REFERENCES "USER"(user_id),
     FOREIGN KEY (resolved_by_user_id) REFERENCES "USER"(user_id),
-    -- CONSTRAINT: An incident must involve an asset, but both cannot be null. Both CAN theoretically exist here if a car crashes into a charger.
+    -- CONSTRAINT: An incident must involve an asset, but both cannot be null.
     CONSTRAINT chk_incident_assets CHECK (
         vehicle_id IS NOT NULL OR resource_id IS NOT NULL
     )
@@ -235,7 +235,7 @@ CREATE TABLE REDISTRIBUTION_TASK (
     to_hub_id TEXT NOT NULL,
     created_by_user_id TEXT NOT NULL,
     priority INTEGER,
-    status TEXT,
+    status TEXT CHECK(status IN ('PENDING', 'IN_TRANSIT', 'COMPLETED', 'FAILED', 'CANCELLED')),
     FOREIGN KEY (recommendation_id) REFERENCES COORDINATION_RECOMMENDATION(recommendation_id),
     FOREIGN KEY (vehicle_id) REFERENCES VEHICLE(vehicle_id),
     FOREIGN KEY (from_hub_id) REFERENCES MOBILITY_HUB(hub_id),
@@ -269,3 +269,57 @@ CREATE TABLE COORDINATION_RECOMMENDATION (
     FOREIGN KEY (source_hub_id) REFERENCES MOBILITY_HUB(hub_id),
     FOREIGN KEY (destination_hub_id) REFERENCES MOBILITY_HUB(hub_id)
 );
+
+-- 8. INDEXES & CONCURRENCY CONSTRAINTS (NFR-01 & NFR-05)
+
+-- Partial Unique Indexes: Concurrency Double-Booking Protection (NFR-05 & Business Rule 1)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_active_vehicle_res 
+ON VEHICLE_RESERVATION (vehicle_id) 
+WHERE status IN ('CONFIRMED', 'PENDING', 'RESERVED');
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_active_student_res 
+ON VEHICLE_RESERVATION (student_id) 
+WHERE status IN ('CONFIRMED', 'PENDING', 'RESERVED');
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_active_parking_space_res 
+ON PARKING_RESERVATION (parking_space_id) 
+WHERE status IN ('RESERVED', 'CHECKED_IN');
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_active_charging_point_session 
+ON CHARGING_SESSION (charging_point_id) 
+WHERE status = 'CHARGING';
+
+-- Foreign Key & Query Performance Indexes (NFR-01)
+CREATE INDEX IF NOT EXISTS idx_vehicle_hub_status ON VEHICLE (current_hub_id, status, ownership_type);
+CREATE INDEX IF NOT EXISTS idx_vehicle_battery ON VEHICLE (battery_pct);
+
+CREATE INDEX IF NOT EXISTS idx_hub_resource_hub ON HUB_RESOURCE (hub_id, resource_type);
+
+CREATE INDEX IF NOT EXISTS idx_trip_student_status ON TRIP (student_id, status);
+CREATE INDEX IF NOT EXISTS idx_trip_origin_dest ON TRIP (origin_hub_id, destination_hub_id);
+
+CREATE INDEX IF NOT EXISTS idx_reservation_vehicle_status ON VEHICLE_RESERVATION (vehicle_id, status);
+CREATE INDEX IF NOT EXISTS idx_reservation_student_status ON VEHICLE_RESERVATION (student_id, status);
+CREATE INDEX IF NOT EXISTS idx_reservation_trip ON VEHICLE_RESERVATION (trip_id);
+CREATE INDEX IF NOT EXISTS idx_reservation_deadline ON VEHICLE_RESERVATION (pickup_deadline_at);
+
+CREATE INDEX IF NOT EXISTS idx_rental_reservation ON RENTAL (reservation_id);
+CREATE INDEX IF NOT EXISTS idx_rental_origin_hub ON RENTAL (origin_hub_id);
+CREATE INDEX IF NOT EXISTS idx_rental_return_hub ON RENTAL (return_hub_id);
+CREATE INDEX IF NOT EXISTS idx_rental_status ON RENTAL (status);
+
+CREATE INDEX IF NOT EXISTS idx_parking_res_space ON PARKING_RESERVATION (parking_space_id, status);
+CREATE INDEX IF NOT EXISTS idx_parking_res_user ON PARKING_RESERVATION (user_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_charging_session_point ON CHARGING_SESSION (charging_point_id, status);
+CREATE INDEX IF NOT EXISTS idx_charging_session_user ON CHARGING_SESSION (user_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_telemetry_vehicle_ts ON SENSOR_TELEMETRY (vehicle_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_telemetry_resource_ts ON SENSOR_TELEMETRY (resource_id, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_incident_hub_status ON OPERATIONAL_INCIDENT (hub_id, status);
+CREATE INDEX IF NOT EXISTS idx_incident_vehicle ON OPERATIONAL_INCIDENT (vehicle_id);
+CREATE INDEX IF NOT EXISTS idx_incident_resource ON OPERATIONAL_INCIDENT (resource_id);
+
+CREATE INDEX IF NOT EXISTS idx_redist_task_status ON REDISTRIBUTION_TASK (status);
+CREATE INDEX IF NOT EXISTS idx_redist_task_vehicle ON REDISTRIBUTION_TASK (vehicle_id);
