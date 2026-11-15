@@ -7,7 +7,7 @@ from app.core.utils import utc_now
 from app.database import UowDependency
 from app.schemas.operations import (
     DispatchOut, IncidentCreate, IncidentOut, IncidentResolve, OperationsAlert, OperationsOut,
-    RedistributionTaskCreate, SimulationCreate,
+    RedistributionTaskCreate, SimulationCreate, SimulationRunOut,
 )
 from app.services.charging_service import ChargingService
 from app.services.operation_service import OperationService
@@ -130,6 +130,19 @@ def complete_redistribution_task(task_id: str, uow: UowDependency, principal: Op
     return service.dispatch_view(task)
 
 
-@router.post("/simulations", status_code=201)
+@router.get("/simulations", response_model=list[SimulationRunOut])
+def list_simulations(
+    uow: UowDependency, principal: Operator,
+    offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200),
+):
+    return SimulationService(uow).list(offset, limit)
+
+
+@router.get("/simulations/{run_id}", response_model=SimulationRunOut, operation_id="API-028")
+def get_simulation(run_id: str, uow: UowDependency, principal: Operator):
+    return SimulationService(uow).get(run_id)
+
+
+@router.post("/simulations", status_code=201, response_model=SimulationRunOut, operation_id="API-027")
 def run_simulation(payload: SimulationCreate, uow: UowDependency, principal: Operator):
     return SimulationService(uow).run(principal.user_id, payload)
