@@ -1,7 +1,8 @@
 from collections.abc import Generator
+from typing import Annotated
 
+from fastapi import Depends
 from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import get_settings
@@ -16,12 +17,16 @@ connect_args = {"check_same_thread": False} if settings.database_url.startswith(
 engine = create_engine(settings.database_url, connect_args=connect_args, future=True)
 
 
-@event.listens_for(Engine, "connect")
+@event.listens_for(engine, "connect")
 def enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
-    if settings.database_url.startswith("sqlite") and settings.sqlite_foreign_keys:
+    if engine.dialect.name == "sqlite":
         cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
+        try:
+            cursor.execute("PRAGMA busy_timeout=5000")
+            if settings.sqlite_foreign_keys:
+                cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
 
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, class_=Session)
@@ -47,3 +52,7 @@ def get_uow():
         raise
     finally:
         db.close()
+
+
+# Finalize the transaction before FastAPI sends the response.
+UowDependency = Annotated[object, Depends(get_uow, scope="function")]

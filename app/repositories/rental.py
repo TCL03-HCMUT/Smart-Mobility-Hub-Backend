@@ -1,5 +1,8 @@
+from datetime import timedelta
+
 from sqlalchemy import desc, select
 
+from app.core.utils import parse_utc
 from app.models.entities import Rental, Trip, VehicleReservation
 from app.repositories.base import BaseRepository
 
@@ -30,6 +33,13 @@ class RentalRepository(BaseRepository[Rental]):
             )
         )
         return self.db.scalar(statement)
+
+    def find_by_student(self, student_id: str) -> list[Rental]:
+        query = (select(self.model)
+                 .join(VehicleReservation)
+                 .where(VehicleReservation.student_id == student_id)
+                 .order_by(desc(self.model.picked_up_at), self.model.rental_id))
+        return list(self.db.scalars(query))
 
     def find_by_reservation(self, reservation_id: str) -> Rental | None:
         """Find the rental record created for a given reservation."""
@@ -62,18 +72,19 @@ class VehicleReservationRepository(BaseRepository[VehicleReservation]):
         statement = (
             select(self.model)
             .where(self.model.student_id == student_id)
-            .order_by(desc(self.model.reserved_at))
+            .order_by(desc(self.model.reserved_at), self.model.reservation_id)
         )
         return list(self.db.scalars(statement).all())
 
     def find_overdue_reservations(self, current_time_iso: str) -> list[VehicleReservation]:
-        """Find active reservations that have passed their pickup deadline (FR-09)."""
+        """Find active reservations that have passed their pickup deadline (FR-025)."""
         statement = select(self.model).where(
             self.model.status.in_(self.ACTIVE_STATUSES),
-            self.model.pickup_deadline_at.isnot(None),
-            self.model.pickup_deadline_at < current_time_iso,
         )
-        return list(self.db.scalars(statement).all())
+        cutoff = parse_utc(current_time_iso)
+        return [res for res in self.db.scalars(statement)
+                if (parse_utc(res.pickup_deadline_at) if res.pickup_deadline_at
+                    else parse_utc(res.reserved_at) + timedelta(minutes=15)) <= cutoff]
 
 
 class TripRepository(BaseRepository[Trip]):
