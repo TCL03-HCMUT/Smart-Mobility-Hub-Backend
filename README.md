@@ -1,64 +1,34 @@
-# Smart Mobility Backend
+# Smart E-Mobility Hub backend
 
-FastAPI modular-monolith backend for the React frontend. The package mirrors the
-database domains while keeping HTTP, business, and persistence concerns separate.
+API for the gogreen course project. It manages shared rentals, parking, charging, incidents, vehicle dispatch, and What-if simulation.
 
-## Layout
+**Stack:** Python, FastAPI, Pydantic, SQLAlchemy, SQLite, and Uvicorn. The demo runs on SQLite. PostgreSQL is part of the full system design.
 
-- `app/api/routes` — REST endpoints and transport concerns.
-- `app/schemas` — Pydantic request/response contracts.
-- `app/services` — use-case rules and module workflows; services depend on repositories only through `UnitOfWork`.
-- `app/repositories` — SQLAlchemy data-access helpers.
-- `app/models` — ORM mapping for the supplied SQLite schema.
-- `app/core` — configuration, security, utilities, and exceptions.
-- `app/database.py` — engine, sessions, and SQLite foreign-key setup.
-- `tests` — API and service tests.
+## Folder structure
 
-## Run
+| Folder | Contents |
+|---|---|
+| `app/api/routes/`, `app/schemas/` | HTTP endpoints and request/response models |
+| `app/services/` | Business rules and simulation |
+| `app/models/`, `app/repositories/` | Database models and queries |
+| `app/core/`, `app/demo.py` | Configuration, authentication, and demo seed |
+| `docs/`, `tests/` | OpenAPI contract and backend tests |
 
-```powershell
+## Run locally
+
+Use Python 3.11+. From this repo, run:
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install -e ".[test]"
-python -m uvicorn app.main:app --reload
+cp .env.example .env
+python -m app.demo seed
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-API documentation is available at `http://localhost:8000/docs`.
+`seed` creates the configured SQLite schema and adds the demo data. To keep seed battery readings fresh for a repeatable demo, set `DEMO_CLOCK_UTC` in `.env` before running seed and starting the server. See [`.env.example`](.env.example) for an example.
 
-## Database schema assessment
+Open [Swagger UI](http://127.0.0.1:8000/docs) or start the companion `se-frontend` app. Demo accounts are `anh@demo.example` and `bao@demo.example` (students), and `nam@demo.example` (operator). All use the password `gogreen-demo`.
 
-The supplied `db_schema.sql` is valid SQLite: an in-memory execution created all
-23 tables and `PRAGMA foreign_key_check` returned no violations.
-
-SQLAlchemy ORM is appropriate because it provides typed mappings, session/unit-of-work
-handling, and one place for migrations and testable repositories. SQLite is suitable
-for this course implementation when the database remains single-process and
-deployment uses the file-backed SQLite configuration. Enable foreign keys per
-connection and prefer PostgreSQL if concurrent writers become a production requirement.
-
-The SQL schema is a usable foundation, but it should be tightened before final use:
-
-- Define lifecycle values as status check constraints and enums in Python.
-- Represent timestamps as ISO-8601 `TEXT`, or add migrations that use typed datetime storage.
-- Add indexes for reservation, vehicle, hub, status, and telemetry lookup columns.
-- Add overlap constraints/application locking for parking, charging, vehicle, and pickup allocation.
-- Replace schema-level forward FK references with migration-managed creation order if a migration tool reports issues.
-- Add uniqueness/transaction rules for HUB_RESOURCE specialization and only-one-active-policy constraints.
-
-Authentication currently has a placeholder principal. JWT validation, role authorization,
-and ownership checks must be implemented before protected endpoints are enabled.
-
-## Application logic implementation
-
-The current backend is intentionally a service skeleton. Domain classes under
-`app/services` contain typed workflow contracts, while `app/repositories` contains
-data-access responsibilities. Team members should implement business methods in
-the service layer and call repositories rather than SQLAlchemy APIs directly.
-
-The intended dependency direction is REST routes -> services -> unit of work ->
-repositories -> ORM models. API routes must not construct repositories or call
-SQLAlchemy sessions directly. Specialized repositories inherit the small
-`BaseRepository` CRUD hierarchy, while domain-specific query methods may be added
-to those subclasses without expanding the diagram's base class.
-
-Service methods raise `NotImplementedError` until assigned implementation is
-complete. This keeps REST routing, persistence mapping, request schemas, and
-application use cases independently maintainable.
+Run `python -m pytest -q` for tests. The [OpenAPI contract](docs/openapi.json) is available in this repo.
