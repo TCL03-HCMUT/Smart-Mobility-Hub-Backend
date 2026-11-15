@@ -1,13 +1,15 @@
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
+from app import database, demo
+from app.core.security import CSRF_COOKIE, hash_password
 from app.database import Base, get_uow
 from app.main import app
 from app.repositories.unit_of_work import UnitOfWork
-from app.models.entities import MobilityHub, User
+from app.models.entities import DemoCredential, HubResource, MobilityHub, ParkingSpace, User
 
 
 @pytest.fixture
@@ -96,11 +98,56 @@ def seed_data(uow):
     uow.users.add(student2)
     uow.hubs.add(hub_metro)
     uow.hubs.add(hub_dorm)
+    operator = User(
+        user_id="operator-1", sso_subject="operator@demo.example", email="operator@demo.example",
+        user_type="OPERATOR", status="ACTIVE",
+    )
+    uow.users.add(operator)
+    uow.session.flush()
+    for hub in (hub_metro, hub_dorm):
+        resource_id = f"{hub.hub_id}-space"
+        uow.resources.add(HubResource(
+            resource_id=resource_id, hub_id=hub.hub_id, code="P1", resource_type="PARKING_SPACE",
+        ))
+        uow.session.flush()
+        uow.parking_spaces.add(ParkingSpace(resource_id=resource_id))
+    password_hash = hash_password("fixture-password")
+    uow.session.add_all(
+        DemoCredential(user_id=user.user_id, password_hash=password_hash)
+        for user in (student, student2, operator)
+    )
     uow.commit()
     return {
+        "operator": operator,
         "student": student,
         "student2": student2,
         "hub_metro": hub_metro,
         "hub_dorm": hub_dorm,
     }
 
+
+
+@pytest.fixture
+def login_as(client):
+    def login(user):
+        response = client.post("/api/v1/sessions", json={
+            "login_alias": user.email, "password": "fixture-password",
+        })
+        assert response.status_code == 201, response.text
+        return {"X-CSRF-Token": client.cookies[CSRF_COOKIE]}
+    return login
+
+
+@pytest.fixture
+def file_database(tmp_path, monkeypatch):
+    url = f"sqlite:///{tmp_path / 'demo.db'}"
+    engine = create_engine(url, connect_args={"check_same_thread": False})
+
+    @event.listens_for(engine, "connect")
+    def enable_fk(connection, _):
+        connection.execute("PRAGMA foreign_keys=ON")
+
+    monkeypatch.setattr(demo, "engine", engine)
+    monkeypatch.setattr(database, "SessionLocal", sessionmaker(engine, expire_on_commit=False))
+    yield url, engine
+    engine.dispose()

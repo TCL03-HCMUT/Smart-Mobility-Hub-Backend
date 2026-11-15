@@ -1,7 +1,8 @@
-from app.models.entities import PublicVehicle, Vehicle
+from app.core.utils import utc_now_iso, uuid_id
+from app.models.entities import PublicVehicle, SensorTelemetry, Vehicle
 
 
-def test_api_rental_lifecycle(client, uow, seed_data):
+def test_api_rental_lifecycle(client, uow, seed_data, login_as):
     # Seed available public vehicle
     veh = Vehicle(
         vehicle_id="veh-api-rent-1",
@@ -14,13 +15,14 @@ def test_api_rental_lifecycle(client, uow, seed_data):
     )
     uow.vehicles.add(veh)
     uow.session.flush()
+    uow.telemetry.add(SensorTelemetry(sensor_id=uuid_id(), vehicle_id=veh.vehicle_id,
+        metric_name="battery_pct", metric_value=veh.battery_pct, timestamp=utc_now_iso()))
 
     pub = PublicVehicle(vehicle_id="veh-api-rent-1")
     uow.public_vehicles.add(pub)
     uow.commit()
 
-    token = seed_data["student"].user_id
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = login_as(seed_data["student"])
 
     # 1. Create reservation
     res_resp = client.post(
@@ -56,7 +58,7 @@ def test_api_rental_lifecycle(client, uow, seed_data):
     assert return_resp.json()["status"] == "COMPLETED"
 
 
-def test_api_cancel_reservation(client, uow, seed_data):
+def test_api_cancel_reservation(client, uow, seed_data, login_as):
     veh = Vehicle(
         vehicle_id="veh-api-rent-2",
         license_plate="59-API-RENT-2",
@@ -68,12 +70,13 @@ def test_api_cancel_reservation(client, uow, seed_data):
     )
     uow.vehicles.add(veh)
     uow.session.flush()
+    uow.telemetry.add(SensorTelemetry(sensor_id=uuid_id(), vehicle_id=veh.vehicle_id,
+        metric_name="battery_pct", metric_value=veh.battery_pct, timestamp=utc_now_iso()))
 
     uow.public_vehicles.add(PublicVehicle(vehicle_id="veh-api-rent-2"))
     uow.commit()
 
-    token = seed_data["student"].user_id
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = login_as(seed_data["student"])
 
     res_resp = client.post(
         "/api/v1/rentals/reservations",
@@ -82,12 +85,15 @@ def test_api_cancel_reservation(client, uow, seed_data):
     )
     reservation_id = res_resp.json()["reservation_id"]
 
-    # Unauthorized student cancels -> 403
+    # Another student cannot see the hold.
+    headers = login_as(seed_data["student2"])
     unauth_resp = client.post(
         f"/api/v1/rentals/reservations/{reservation_id}/cancel",
-        headers={"Authorization": f"Bearer {seed_data['student2'].user_id}"},
+        headers=headers,
     )
-    assert unauth_resp.status_code == 403
+    assert unauth_resp.status_code == 404
+
+    headers = login_as(seed_data["student"])
 
     # Authorized cancellation
     cancel_resp = client.post(
@@ -98,7 +104,7 @@ def test_api_cancel_reservation(client, uow, seed_data):
     assert cancel_resp.json()["status"] == "CANCELLED"
 
 
-def test_api_rental_conflict_responses(client, uow, seed_data):
+def test_api_rental_conflict_responses(client, uow, seed_data, login_as):
     veh = Vehicle(
         vehicle_id="veh-api-conflict",
         license_plate="59-API-CONFLICT",
@@ -110,23 +116,26 @@ def test_api_rental_conflict_responses(client, uow, seed_data):
     )
     uow.vehicles.add(veh)
     uow.session.flush()
+    uow.telemetry.add(SensorTelemetry(sensor_id=uuid_id(), vehicle_id=veh.vehicle_id,
+        metric_name="battery_pct", metric_value=veh.battery_pct, timestamp=utc_now_iso()))
     uow.public_vehicles.add(PublicVehicle(vehicle_id="veh-api-conflict"))
     uow.commit()
 
-    token1 = seed_data["student"].user_id
-    token2 = seed_data["student2"].user_id
+    headers = login_as(seed_data["student"])
 
     # User 1 reserves
     client.post(
         "/api/v1/rentals/reservations",
-        headers={"Authorization": f"Bearer {token1}"},
+        headers=headers,
         json={"vehicle_id": "veh-api-conflict"},
     )
+
+    headers = login_as(seed_data["student2"])
 
     # User 2 attempts double-booking -> 409 Conflict
     conflict_resp = client.post(
         "/api/v1/rentals/reservations",
-        headers={"Authorization": f"Bearer {token2}"},
+        headers=headers,
         json={"vehicle_id": "veh-api-conflict"},
     )
     assert conflict_resp.status_code == 409
