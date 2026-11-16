@@ -1,34 +1,33 @@
-# Smart E-Mobility Hub backend
+# Smart Mobility Backend
 
-API for the gogreen course project. It manages shared rentals, parking, charging, incidents, vehicle dispatch, and What-if simulation.
+FastAPI modular-monolith backend for the React frontend. The package mirrors the
+database domains while keeping HTTP, business, and persistence concerns separate.
 
-**Stack:** Python, FastAPI, Pydantic, SQLAlchemy, SQLite, and Uvicorn. The demo runs on SQLite. PostgreSQL is part of the full system design.
+## Layout
 
-## Folder structure
+- `app/api/routes` — REST endpoints and transport concerns.
+- `app/schemas` — Pydantic request/response contracts.
+- `app/services` — use-case rules and module workflows; services depend on repositories only through `UnitOfWork`.
+- `app/repositories` — SQLAlchemy data-access helpers.
+- `app/models` — ORM mapping for the supplied SQLite schema.
+- `app/core` — configuration, security, utilities, and exceptions.
+- `app/database.py` — engine, sessions, and SQLite foreign-key setup.
+- `tests` — API and service tests.
 
-| Folder | Contents |
-|---|---|
-| `app/api/routes/`, `app/schemas/` | HTTP endpoints and request/response models |
-| `app/services/` | Business rules and simulation |
-| `app/models/`, `app/repositories/` | Database models and queries |
-| `app/core/`, `app/demo.py` | Configuration, authentication, and demo seed |
-| `docs/`, `tests/` | OpenAPI contract and backend tests |
+## Run
 
-## Run locally
+Use Python 3.11+. The demo uses a local SQLite file. PostgreSQL is part of the full system design.
 
-Use Python 3.11+. From this repo, run:
-
-```sh
-python3 -m venv .venv
-source .venv/bin/activate
+```powershell
 python -m pip install -e ".[test]"
-cp .env.example .env
 python -m app.demo seed
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --reload
 ```
 
-`seed` creates the configured SQLite schema and adds the demo data. To keep seed battery readings fresh for a repeatable demo, set `DEMO_CLOCK_UTC` in `.env` before running seed and starting the server. See [`.env.example`](.env.example) for an example.
+API documentation is available at `http://localhost:8000/docs`.
 
-Open [Swagger UI](http://127.0.0.1:8000/docs) or start the companion `se-frontend` app. Demo accounts are `anh@demo.example` and `bao@demo.example` (students), and `nam@demo.example` (operator). All use the password `gogreen-demo`.
+Demo accounts are `anh@demo.example` and `bao@demo.example` (students), and `nam@demo.example` (operator). All use the password `gogreen-demo`.
 
-Run `python -m pytest -q` for tests. The [OpenAPI contract](docs/openapi.json) is available in this repo.
+For a repeatable demo, copy `.env.example` to `.env` and set `DEMO_CLOCK_UTC` before seeding and starting the server.
+
+Run `python -m pytest -q` for tests. See the [OpenAPI contract](docs/openapi.json).
