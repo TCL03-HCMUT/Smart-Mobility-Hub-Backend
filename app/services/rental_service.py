@@ -1,14 +1,19 @@
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import AppError, NotFoundError
-from app.core.utils import utc_now_iso, uuid_id
-from app.models.entities import Rental, Trip, Vehicle, VehicleReservation
-from app.schemas.rental import VehicleReservationCreate
+from app.core.utils import parse_utc, utc_now, utc_now_iso, uuid_id
+from app.models.entities import FleetParking, IncidentResolution, Rental, RentalHoldContext, Trip, Vehicle, VehicleReservation
+from app.schemas.rental import HoldCreate
 from app.services.base import BaseService
 
-MINIMUM_RENTAL_BATTERY_PCT = 20.0
+from app.services.operational_activity import record_activity
+from app.services.operational_guards import committed_task, open_vehicle_fault, pending_dispatch_vehicles
+from app.services.parking_allocator import ParkingAllocator
+from app.services.rental_battery import MINIMUM_RENTAL_BATTERY_PCT, battery_issue
+
+ACTIVE_HOLDS = ("CONFIRMED", "PENDING", "RESERVED")
 DEFAULT_RESERVATION_GRACE_MINUTES = 15
 
 
@@ -53,7 +58,7 @@ class RentalService(BaseService):
             status_code=403,
         )
         self._ensure(
-            trip.status in ("PLANNED", "IN_PROGRESS"),
+            trip.status in ("PLANNED",),
             f"Trip cannot be cancelled in '{trip.status}' status",
             status_code=400,
         )
@@ -69,24 +74,35 @@ class RentalService(BaseService):
         self.uow.session.flush()
         return trip
 
-    def search_available_vehicles(self, criteria: dict) -> list[Vehicle]:
+    def search_available_vehicles(self, criteria: dict, *, now=None) -> list[Vehicle]:
         """Search available public rental vehicles with sufficient battery at a given hub."""
-        hub_id = criteria.get("hub_id")
-        vehicle_type = criteria.get("vehicle_type")
-        min_battery = float(criteria.get("min_battery", MINIMUM_RENTAL_BATTERY_PCT))
-        return self.uow.vehicles.find_available(
-            hub_id=hub_id,
-            vehicle_type=vehicle_type,
-            min_battery=min_battery,
+        now = now or utc_now()
+        for key in ("hub_id", "destination_hub_id"):
+            if criteria.get(key):
+                self._get_or_404(self.uow.hubs, criteria[key], "MobilityHub")
+        due = {res.vehicle_id for res in self.uow.reservations.find_overdue_reservations(now.isoformat())}
+        candidates = self.uow.vehicles.search({**criteria, "ownership_type": "PUBLIC"})
+        committed = pending_dispatch_vehicles(self.uow)
+        active_hubs = {hub.hub_id for hub in self.uow.hubs.find(status="ACTIVE")}
+        return sorted(
+            (vehicle for vehicle in candidates
+             if vehicle.current_hub_id in active_hubs
+             and vehicle.vehicle_id not in committed
+             and not open_vehicle_fault(self.uow, vehicle.vehicle_id)
+             and (vehicle.status == "AVAILABLE" or (vehicle.status == "RESERVED" and vehicle.vehicle_id in due))
+             and battery_issue(self.uow, vehicle, now, float(criteria.get("min_battery", MINIMUM_RENTAL_BATTERY_PCT))) is None),
+            key=lambda vehicle: vehicle.vehicle_id,
         )
 
     def reserve_vehicle(
-        self, student_id: str, payload: VehicleReservationCreate
+        self, student_id: str, payload: HoldCreate
     ) -> VehicleReservation:
         """Reserve a public rental vehicle for a student."""
         student = self.uow.users.get_by_id(student_id)
         self._ensure(student is not None, f"Student {student_id} was not found", status_code=404)
 
+        now = utc_now()
+        self.expire_overdue_reservations(now)
         active_res = self.uow.reservations.find_active_by_student(student_id)
         if active_res:
             raise AppError("User already has an active vehicle reservation", status_code=409)
@@ -101,50 +117,40 @@ class RentalService(BaseService):
             "Only public fleet vehicles can be reserved for rental",
             status_code=400,
         )
-        self._ensure(
-            vehicle.status == "AVAILABLE",
-            f"Vehicle '{payload.vehicle_id}' is not available (current status: '{vehicle.status}')",
-            status_code=409,
-        )
-        self._ensure(
-            vehicle.battery_pct is None or vehicle.battery_pct >= MINIMUM_RENTAL_BATTERY_PCT,
-            f"Vehicle battery level ({vehicle.battery_pct}%) is below the minimum threshold ({MINIMUM_RENTAL_BATTERY_PCT}%)",
-            status_code=400,
-        )
+        if vehicle.status != "AVAILABLE" or committed_task(self.uow, vehicle.vehicle_id) or open_vehicle_fault(self.uow, vehicle.vehicle_id):
+            raise AppError("Vehicle is not available.", 409, code="VEHICLE_UNAVAILABLE")
+        trip_id = getattr(payload, "trip_id", None)
+        intended = payload.intended_hub_id
+        if trip_id:
+            trip = self._get_or_404(self.uow.trips, trip_id, "Trip")
+            self._ensure(trip.student_id == student_id, "Trip does not belong to the student", status_code=403)
+            departure = parse_utc(trip.planned_departure) if trip.planned_departure else now
+            if (
+                trip.status != "PLANNED" or trip.origin_hub_id != vehicle.current_hub_id
+                or departure > now or (intended and intended != trip.destination_hub_id)
+            ):
+                raise AppError("Trip is incompatible with immediate pickup.", 409, code="TRIP_CONFLICT")
+            intended = trip.destination_hub_id
+        origin = self.uow.hubs.get_by_id(vehicle.current_hub_id) if vehicle.current_hub_id else None
+        if origin is None or origin.status != "ACTIVE":
+            raise AppError("Vehicle has no active origin hub.", 409, code="VEHICLE_UNAVAILABLE")
+        if intended:
+            self._get_or_404(self.uow.hubs, intended, "MobilityHub")
+        self._require_battery(vehicle, now)
+        if self.uow.reservations.find_active_by_vehicle(payload.vehicle_id):
+            raise AppError("Vehicle is already reserved.", 409, code="VEHICLE_UNAVAILABLE")
 
-        existing_res = self.uow.reservations.find_active_by_vehicle(payload.vehicle_id)
-        if existing_res:
-            raise AppError(f"Vehicle '{payload.vehicle_id}' is already reserved", status_code=409)
-
-        if payload.trip_id:
-            trip = self._get_or_404(self.uow.trips, payload.trip_id, "Trip")
-            self._ensure(
-                trip.student_id == student_id,
-                "Trip does not belong to the student",
-                status_code=403,
-            )
-
-        now = datetime.now(UTC)
-        start_dt = payload.planned_start_at or now
-        if start_dt.tzinfo is None:
-            start_dt = start_dt.replace(tzinfo=UTC)
-
-        deadline_dt = payload.pickup_deadline_at or (
-            start_dt + timedelta(minutes=DEFAULT_RESERVATION_GRACE_MINUTES)
-        )
-        if deadline_dt.tzinfo is None:
-            deadline_dt = deadline_dt.replace(tzinfo=UTC)
-
+        deadline = now + timedelta(minutes=DEFAULT_RESERVATION_GRACE_MINUTES)
         vehicle.status = "RESERVED"
 
         reservation = VehicleReservation(
             reservation_id=uuid_id(),
-            trip_id=payload.trip_id,
+            trip_id=trip_id,
             student_id=student_id,
             vehicle_id=payload.vehicle_id,
             reserved_at=now.isoformat(),
-            planned_start_at=start_dt.isoformat(),
-            pickup_deadline_at=deadline_dt.isoformat(),
+            planned_start_at=now.isoformat(),
+            pickup_deadline_at=deadline.isoformat(),
             status="CONFIRMED",
         )
         try:
@@ -153,15 +159,20 @@ class RentalService(BaseService):
         except IntegrityError:
             raise AppError("Vehicle is already reserved or user already has an active reservation", status_code=409)
 
+        self.uow.session.add(RentalHoldContext(
+            reservation_id=reservation.reservation_id, origin_hub_id=origin.hub_id, intended_hub_id=intended,
+        ))
+        record_activity(self.uow, student_id, "HOLD_CREATED", "hold", reservation.reservation_id)
         return reservation
 
     def cancel_reservation(self, reservation_id: str, student_id: str) -> VehicleReservation:
         """Cancel an active reservation and release the reserved vehicle back to the available pool."""
         reservation = self._reservation(reservation_id, student_id)
+        self._check_expiry(reservation, utc_now())
         self._ensure(
             reservation.status in ("CONFIRMED", "PENDING", "RESERVED"),
             f"Cannot cancel reservation in '{reservation.status}' status",
-            status_code=400,
+            status_code=409,
         )
 
         reservation.status = "CANCELLED"
@@ -169,50 +180,40 @@ class RentalService(BaseService):
         if vehicle and vehicle.status == "RESERVED":
             vehicle.status = "AVAILABLE"
 
+        record_activity(self.uow, student_id, "HOLD_CANCELLED", "hold", reservation_id)
         self.uow.session.flush()
         return reservation
 
     def pick_up(self, reservation_id: str, student_id: str) -> Rental:
         """Pick up a reserved vehicle, completing reservation and initiating an active rental."""
         reservation = self._reservation(reservation_id, student_id)
-        self._ensure(
-            reservation.status in ("CONFIRMED", "PENDING", "RESERVED"),
-            f"Reservation cannot be picked up in '{reservation.status}' status",
-            status_code=400,
-        )
-
-        now = datetime.now(UTC)
-        if reservation.pickup_deadline_at:
-            try:
-                deadline = datetime.fromisoformat(reservation.pickup_deadline_at.replace("Z", "+00:00"))
-                if deadline.tzinfo is None:
-                    deadline = deadline.replace(tzinfo=UTC)
-                if now > deadline:
-                    reservation.status = "EXPIRED"
-                    vehicle = self.uow.vehicles.get_by_id(reservation.vehicle_id)
-                    if vehicle and vehicle.status == "RESERVED":
-                        vehicle.status = "AVAILABLE"
-                    self.uow.session.flush()
-                    raise AppError("Reservation has expired past pickup deadline", status_code=400)
-            except ValueError:
-                pass
-
+        now = utc_now()
+        self._check_expiry(reservation, now)
+        if reservation.status not in ACTIVE_HOLDS:
+            raise AppError("Hold cannot be picked up.", 409, code="INVALID_TRANSITION")
         vehicle = self._get_or_404(self.uow.vehicles, reservation.vehicle_id, "Vehicle")
-        self._ensure(
-            vehicle.status == "RESERVED",
-            f"Vehicle is in status '{vehicle.status}', expected 'RESERVED'",
-            status_code=400,
-        )
-
+        context = self.uow.session.get(RentalHoldContext, reservation_id)
+        origin = self.uow.hubs.get_by_id(vehicle.current_hub_id) if vehicle.current_hub_id else None
+        if (
+            vehicle.status != "RESERVED" or origin is None or origin.status != "ACTIVE"
+            or open_vehicle_fault(self.uow, vehicle.vehicle_id)
+            or (context and context.origin_hub_id != origin.hub_id)
+        ):
+            raise AppError("Vehicle is no longer available at the pickup hub.", 409, code="VEHICLE_UNAVAILABLE")
+        self._require_battery(vehicle, now)
         reservation.status = "COMPLETED"
         vehicle.status = "IN_USE"
+        vehicle.current_hub_id = None
+        allocation = self.uow.session.get(FleetParking, vehicle.vehicle_id)
+        if allocation:
+            self.uow.session.delete(allocation)
 
         rental = Rental(
             rental_id=uuid_id(),
             reservation_id=reservation.reservation_id,
-            origin_hub_id=vehicle.current_hub_id or "",
+            origin_hub_id=origin.hub_id,
             return_hub_id=None,
-            picked_up_at=utc_now_iso(),
+            picked_up_at=now.isoformat(),
             returned_at=None,
             return_condition=None,
             status="ACTIVE",
@@ -224,6 +225,7 @@ class RentalService(BaseService):
             if trip and trip.status == "PLANNED":
                 trip.status = "IN_PROGRESS"
 
+        record_activity(self.uow, student_id, "RENTAL_PICKED_UP", "rental", rental.rental_id)
         self.uow.session.flush()
         return rental
 
@@ -247,43 +249,85 @@ class RentalService(BaseService):
         self._ensure(
             rental.status == "ACTIVE",
             f"Rental is in '{rental.status}' status, expected 'ACTIVE'",
-            status_code=400,
+            status_code=409,
         )
 
-        self._get_or_404(self.uow.hubs, return_hub_id, "MobilityHub")
+        hub = self._get_or_404(self.uow.hubs, return_hub_id, "MobilityHub")
+        vehicle = self._get_or_404(self.uow.vehicles, reservation.vehicle_id, "Vehicle")
+        now = utc_now()
+        allocator = ParkingAllocator(self.uow)
+        availability = allocator.for_arrival(hub, now, vehicle.vehicle_type)
+        if not availability.candidate_spaces:
+            alternatives = []
+            for alternative in sorted(self.uow.hubs.find(status="ACTIVE"), key=lambda item: item.hub_id):
+                if alternative.hub_id != return_hub_id:
+                    free = allocator.for_arrival(alternative, now, vehicle.vehicle_type).bookable_now
+                    if free:
+                        alternatives.append({"hub_id": alternative.hub_id, "bookable_now": free, "as_of": now.isoformat()})
+            raise AppError("No suitable space at this hub.", 409, code="HUB_FULL", details={
+                "hub_id": return_hub_id, "physical_free_now": availability.physical_free_now,
+                "bookable_now": 0, "as_of": now.isoformat(), "alternatives": alternatives,
+            })
+
+        self.uow.session.add(FleetParking(
+            vehicle_id=vehicle.vehicle_id, parking_space_id=availability.candidate_spaces[0],
+        ))
 
         rental.return_hub_id = return_hub_id
-        rental.returned_at = utc_now_iso()
+        rental.returned_at = now.isoformat()
         rental.return_condition = condition or "GOOD"
         rental.status = "COMPLETED"
 
-        vehicle = self._get_or_404(self.uow.vehicles, reservation.vehicle_id, "Vehicle")
         vehicle.current_hub_id = return_hub_id
-        if condition in ("DAMAGED", "FAULTY", "NEEDS_MAINTENANCE"):
-            vehicle.status = "MAINTENANCE"
-        else:
-            vehicle.status = "AVAILABLE"
+        reported_fault = open_vehicle_fault(self.uow, vehicle.vehicle_id)
+        damaged_return = condition in ("DAMAGED", "FAULTY", "NEEDS_MAINTENANCE")
+        vehicle.status = "MAINTENANCE" if damaged_return or reported_fault else "AVAILABLE"
+        if reported_fault and not damaged_return:
+            metadata = self.uow.session.get(IncidentResolution, reported_fault)
+            if metadata:
+                metadata.set_vehicle_maintenance = 1
 
         if reservation.trip_id:
             trip = self.uow.trips.get_by_id(reservation.trip_id)
             if trip and trip.status == "IN_PROGRESS":
                 trip.status = "COMPLETED"
 
+        record_activity(self.uow, student_id, "RENTAL_RETURNED", "rental", rental_id)
         self.uow.session.flush()
         return rental
 
-    def expire_overdue_reservations(self) -> list[VehicleReservation]:
-        """Sweep and expire any active reservations that have passed their pickup deadline (FR-09)."""
-        now_iso = utc_now_iso()
-        overdue = self.uow.reservations.find_overdue_reservations(now_iso)
+    def expire_overdue_reservations(self, now=None) -> list[VehicleReservation]:
+        now = now or utc_now()
+        overdue = self.uow.reservations.find_overdue_reservations(now.isoformat())
         for res in overdue:
-            res.status = "EXPIRED"
-            vehicle = self.uow.vehicles.get_by_id(res.vehicle_id)
-            if vehicle and vehicle.status == "RESERVED":
-                vehicle.status = "AVAILABLE"
+            self._expire(res)
         if overdue:
             self.uow.session.flush()
         return overdue
+
+    @staticmethod
+    def expires_at(reservation):
+        if reservation.pickup_deadline_at:
+            return parse_utc(reservation.pickup_deadline_at)
+        return parse_utc(reservation.reserved_at) + timedelta(minutes=DEFAULT_RESERVATION_GRACE_MINUTES)
+
+    def _check_expiry(self, reservation, now):
+        if reservation.status in ACTIVE_HOLDS and now >= self.expires_at(reservation):
+            self._expire(reservation)
+        if reservation.status == "EXPIRED":
+            raise AppError("Hold has expired.", 409, code="HOLD_EXPIRED")
+
+    def _expire(self, reservation):
+        reservation.status = "EXPIRED"
+        vehicle = self.uow.vehicles.get_by_id(reservation.vehicle_id)
+        if vehicle and vehicle.status == "RESERVED":
+            vehicle.status = "AVAILABLE"
+        record_activity(self.uow, reservation.student_id, "HOLD_EXPIRED", "hold", reservation.reservation_id, "Deadline reached.")
+
+    def _require_battery(self, vehicle, now):
+        code = battery_issue(self.uow, vehicle, now)
+        if code:
+            raise AppError("Vehicle battery does not meet rental requirements.", 409, code=code)
 
     def _reservation(self, reservation_id: str, student_id: str) -> VehicleReservation:
         """Verify existence and ownership of a vehicle reservation."""

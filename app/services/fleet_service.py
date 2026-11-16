@@ -94,6 +94,10 @@ class FleetService(BaseService):
                 "Battery percentage must be between 0.0 and 100.0",
             )
             vehicle.battery_pct = payload.battery_pct
+            self.uow.telemetry.add(SensorTelemetry(
+                sensor_id=uuid_id(), vehicle_id=vehicle_id, metric_name="battery_pct",
+                metric_value=payload.battery_pct, timestamp=utc_now_iso(), is_simulated=1,
+            ))
 
         vehicle.status = payload.status
         self.uow.session.flush()

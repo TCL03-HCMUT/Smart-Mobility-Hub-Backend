@@ -334,3 +334,90 @@ class RedistributionTask(Base):
         Index("idx_redist_task_status", "status"),
         Index("idx_redist_task_vehicle", "vehicle_id"),
     )
+
+
+class DemoCredential(Base):
+    __tablename__ = "DEMO_CREDENTIAL"
+    user_id = Column(String, ForeignKey("USER.user_id", ondelete="CASCADE"), primary_key=True)
+    password_hash = Column(String, nullable=False)
+
+
+class AuthSession(Base):
+    __tablename__ = "AUTH_SESSION"
+    token_hash = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("USER.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    csrf_hash = Column(String, nullable=False)
+    expires_at = Column(String, nullable=False)
+
+
+class DemoDataset(Base):
+    __tablename__ = "DEMO_DATASET"
+    dataset_id = Column(String, primary_key=True)
+
+
+class RentalHoldContext(Base):
+    __tablename__ = "RENTAL_HOLD_CONTEXT"
+    reservation_id = Column(String, ForeignKey("VEHICLE_RESERVATION.reservation_id", ondelete="CASCADE"), primary_key=True)
+    origin_hub_id = Column(String, ForeignKey("MOBILITY_HUB.hub_id"), nullable=False)
+    intended_hub_id = Column(String, ForeignKey("MOBILITY_HUB.hub_id"))
+
+
+class FleetParking(Base):
+    __tablename__ = "FLEET_PARKING"
+    vehicle_id = Column(String, ForeignKey("VEHICLE.vehicle_id", ondelete="CASCADE"), primary_key=True)
+    parking_space_id = Column(String, ForeignKey("PARKING_SPACE.resource_id"), nullable=False, unique=True)
+
+
+class OperationalRevision(Base):
+    __tablename__ = "OPERATIONAL_REVISION"
+    id = Column(Integer, primary_key=True)
+    value = Column(Integer, nullable=False)
+
+
+class RentalActivity(Base):
+    __tablename__ = "RENTAL_ACTIVITY"
+    operation_id = Column(String, primary_key=True)
+    at = Column(String, nullable=False)
+    actor_id = Column(String, ForeignKey("USER.user_id"), nullable=False, index=True)
+    action = Column(String, nullable=False)
+    resource_type = Column(String, nullable=False)
+    resource_id = Column(String, nullable=False)
+    outcome = Column(String, nullable=False)
+    reason = Column(String)
+
+
+class ChargingRequest(Base):
+    __tablename__ = "CHARGING_REQUEST"
+    session_id = Column(String, primary_key=True)
+    parking_reservation_id = Column(
+        String, ForeignKey("PARKING_RESERVATION.reservation_id"), nullable=False, index=True,
+    )
+    user_id = Column(String, ForeignKey("USER.user_id"), nullable=False, index=True)
+    vehicle_id = Column(String, ForeignKey("VEHICLE.vehicle_id"), nullable=False, index=True)
+    hub_id = Column(String, ForeignKey("MOBILITY_HUB.hub_id"), nullable=False)
+    status = Column(String, nullable=False, index=True)
+    requested_at = Column(String, nullable=False)
+    need_by = Column(String)
+    target_battery_pct = Column(Float, nullable=False)
+    duration_minutes = Column(Integer, nullable=False)
+    charging_point_id = Column(String, ForeignKey("CHARGING_POINT.resource_id"))
+    scheduled_start_at = Column(String)
+    scheduled_end_at = Column(String)
+    reason = Column(String)
+
+
+class DispatchPlan(Base):
+    __tablename__ = "DISPATCH_PLAN"
+    task_id = Column(String, ForeignKey("REDISTRIBUTION_TASK.task_id", ondelete="CASCADE"), primary_key=True)
+    target_space_id = Column(String, ForeignKey("PARKING_SPACE.resource_id"), unique=True)
+    created_at = Column(String, nullable=False)
+    started_at = Column(String)
+    completed_at = Column(String)
+    reason = Column(String)
+
+
+class IncidentResolution(Base):
+    __tablename__ = "INCIDENT_RESOLUTION"
+    incident_id = Column(String, ForeignKey("OPERATIONAL_INCIDENT.incident_id", ondelete="CASCADE"), primary_key=True)
+    resolution_notes = Column(Text)
+    set_vehicle_maintenance = Column(Integer, nullable=False, default=0)

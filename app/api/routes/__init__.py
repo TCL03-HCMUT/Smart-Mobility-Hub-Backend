@@ -1,8 +1,12 @@
 from fastapi import APIRouter
 
-from app.api.routes import charging, fleet, mobility, operations, parking, rental
+from app.api.routes import activity, charging, fleet, mobility, operations, parking, rental, sessions
 
-api_router = APIRouter()
+from app.core.exceptions import ERROR_RESPONSES
+
+api_router = APIRouter(responses=ERROR_RESPONSES)
+api_router.include_router(activity.router, prefix="/activity", tags=["activity"])
+api_router.include_router(sessions.router, prefix="/sessions", tags=["sessions"])
 api_router.include_router(mobility.router, prefix="/mobility", tags=["mobility"])
 api_router.include_router(rental.router, prefix="/rentals", tags=["rentals"])
 api_router.include_router(parking.router, prefix="/parking", tags=["parking"])

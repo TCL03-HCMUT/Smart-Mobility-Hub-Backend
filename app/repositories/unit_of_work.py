@@ -1,5 +1,8 @@
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app.core.exceptions import AppError
+from app.models.entities import OperationalRevision
 from app.repositories.domain import (
     ChargingPointRepository,
     ChargingSessionRepository,
@@ -51,6 +54,32 @@ class UnitOfWork:
         self.roles = RoleRepository(session)
         self.user_roles = UserRoleRepository(session)
         self.student_profiles = StudentProfileRepository(session)
+
+    def lock_operational_write(self) -> None:
+        connection = self.session.connection()
+        if connection.dialect.name == "sqlite":
+            try:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+            except OperationalError as exc:
+                if getattr(exc.orig, "sqlite_errorcode", None) in (5, 6):
+                    raise AppError("Database is busy. Please retry.", 503) from exc
+                raise
+
+    def begin_operational_read(self) -> None:
+        connection = self.session.connection()
+        if connection.dialect.name == "sqlite":
+            connection.exec_driver_sql("BEGIN")
+
+    def operational_revision(self) -> str:
+        revision = self.session.get(OperationalRevision, 1)
+        return str(revision.value) if revision else "0"
+
+    def advance_operational_revision(self) -> None:
+        revision = self.session.get(OperationalRevision, 1)
+        if revision is None:
+            self.session.add(OperationalRevision(id=1, value=1))
+        else:
+            revision.value += 1
 
     def commit(self) -> None:
         self.session.commit()

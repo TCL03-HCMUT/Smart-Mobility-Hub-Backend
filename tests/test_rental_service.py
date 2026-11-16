@@ -1,8 +1,10 @@
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 import pytest
 
 from app.core.exceptions import AppError, NotFoundError
-from app.models.entities import PublicVehicle, Vehicle
+from app.core.config import get_settings
+from app.core.utils import utc_now, utc_now_iso, uuid_id
+from app.models.entities import PublicVehicle, SensorTelemetry, Vehicle
 from app.schemas.rental import VehicleReservationCreate
 from app.services.rental_service import RentalService
 
@@ -23,6 +25,8 @@ def available_public_vehicle(uow, seed_data):
 
     public_veh = PublicVehicle(vehicle_id="veh-rent-1", fleet_batch_code="BATCH-01")
     uow.public_vehicles.add(public_veh)
+    uow.telemetry.add(SensorTelemetry(sensor_id=uuid_id(), vehicle_id=vehicle.vehicle_id,
+        metric_name="battery_pct", metric_value=vehicle.battery_pct, timestamp=utc_now_iso()))
     uow.commit()
     return vehicle
 
@@ -222,11 +226,15 @@ def test_reserve_vehicle_invariants_and_preconditions(uow, seed_data):
     low_bat = Vehicle(
         vehicle_id="veh-res-low",
         license_plate="59-P1 8888",
+        current_hub_id=seed_data["hub_metro"].hub_id,
         ownership_type="PUBLIC",
         status="AVAILABLE",
         battery_pct=14.0,
     )
     uow.vehicles.add(low_bat)
+    uow.session.flush()
+    uow.telemetry.add(SensorTelemetry(sensor_id=uuid_id(), vehicle_id=low_bat.vehicle_id,
+        metric_name="battery_pct", metric_value=low_bat.battery_pct, timestamp=utc_now_iso()))
 
     # 3. Vehicle currently in MAINTENANCE
     maint = Vehicle(
@@ -247,7 +255,8 @@ def test_reserve_vehicle_invariants_and_preconditions(uow, seed_data):
     # Test Low battery
     with pytest.raises(AppError) as exc2:
         rental_svc.reserve_vehicle(seed_data["student"].user_id, VehicleReservationCreate(vehicle_id="veh-res-low"))
-    assert exc2.value.status_code == 400
+    assert exc2.value.status_code == 409
+    assert exc2.value.code == "BATTERY_LOW"
 
     # Test Maintenance status
     with pytest.raises(AppError) as exc3:
@@ -294,7 +303,7 @@ def test_cancel_reservation(uow, seed_data, available_public_vehicle):
     # Cannot cancel already cancelled reservation
     with pytest.raises(AppError) as exc_again:
         rental_svc.cancel_reservation(res.reservation_id, seed_data["student"].user_id)
-    assert exc_again.value.status_code == 400
+    assert exc_again.value.status_code == 409
 
 
 # --- Pickup and Return Lifecycle Tests ---
@@ -364,77 +373,46 @@ def test_pickup_and_return_cycle_with_trip_tracking(uow, seed_data, available_pu
     assert trip.status == "COMPLETED"
 
 
-def test_pickup_past_deadline_expires(uow, seed_data, available_public_vehicle):
+def test_pickup_at_deadline_expires(uow, seed_data, available_public_vehicle, monkeypatch):
     rental_svc = RentalService(uow)
-    now = datetime.now(UTC)
-    past_start = now - timedelta(minutes=30)
-    past_deadline = now - timedelta(minutes=15)
-
-    res = rental_svc.reserve_vehicle(
-        seed_data["student"].user_id,
-        VehicleReservationCreate(
-            vehicle_id=available_public_vehicle.vehicle_id,
-            planned_start_at=past_start,
-            pickup_deadline_at=past_deadline,
-        ),
-    )
+    now = utc_now()
+    monkeypatch.setattr(get_settings(), "demo_clock_utc", now)
+    res = rental_svc.reserve_vehicle(seed_data["student"].user_id,
+                                    VehicleReservationCreate(vehicle_id=available_public_vehicle.vehicle_id))
     uow.commit()
-
-    # Attempt to pick up expired reservation
+    monkeypatch.setattr(get_settings(), "demo_clock_utc", now + timedelta(minutes=15))
     with pytest.raises(AppError) as exc:
         rental_svc.pick_up(res.reservation_id, seed_data["student"].user_id)
-    assert exc.value.status_code == 400
-    assert "expired" in exc.value.message.lower()
-
+    assert exc.value.code == "HOLD_EXPIRED"
     assert res.status == "EXPIRED"
     assert available_public_vehicle.status == "AVAILABLE"
 
 
-def test_expire_overdue_reservations_selective(uow, seed_data, available_public_vehicle):
+def test_expire_overdue_reservations_selective(uow, seed_data, available_public_vehicle, monkeypatch):
     rental_svc = RentalService(uow)
-    now = datetime.now(UTC)
-
-    # 1. Overdue reservation (pickup deadline in the past)
-    past_deadline = now - timedelta(minutes=10)
-    res_overdue = rental_svc.reserve_vehicle(
-        seed_data["student"].user_id,
-        VehicleReservationCreate(
-            vehicle_id=available_public_vehicle.vehicle_id,
-            pickup_deadline_at=past_deadline,
-        ),
-    )
+    now = utc_now()
+    monkeypatch.setattr(get_settings(), "demo_clock_utc", now)
+    res_overdue = rental_svc.reserve_vehicle(seed_data["student"].user_id,
+                                            VehicleReservationCreate(vehicle_id=available_public_vehicle.vehicle_id))
     uow.commit()
-
-    # 2. Active future reservation on a second vehicle
-    v2 = Vehicle(
-        vehicle_id="v-active-fut",
-        license_plate="59-R1 77777",
-        ownership_type="PUBLIC",
-        status="AVAILABLE",
-        battery_pct=90.0,
-    )
+    monkeypatch.setattr(get_settings(), "demo_clock_utc", now + timedelta(minutes=1))
+    v2 = Vehicle(vehicle_id="v-active-fut", license_plate="59-R1 77777",
+                 current_hub_id=seed_data["hub_metro"].hub_id, ownership_type="PUBLIC",
+                 status="AVAILABLE", battery_pct=90.0)
     uow.vehicles.add(v2)
+    uow.session.flush()
+    uow.telemetry.add(SensorTelemetry(sensor_id=uuid_id(), vehicle_id=v2.vehicle_id,
+        metric_name="battery_pct", metric_value=v2.battery_pct, timestamp=utc_now_iso()))
     uow.commit()
-
-    res_active = rental_svc.reserve_vehicle(
-        seed_data["student2"].user_id,
-        VehicleReservationCreate(
-            vehicle_id="v-active-fut",
-            pickup_deadline_at=now + timedelta(minutes=15),
-        ),
-    )
+    res_active = rental_svc.reserve_vehicle(seed_data["student2"].user_id,
+                                           VehicleReservationCreate(vehicle_id=v2.vehicle_id))
     uow.commit()
-
-    # Sweep overdue reservations
+    monkeypatch.setattr(get_settings(), "demo_clock_utc", now + timedelta(minutes=15))
     expired_list = rental_svc.expire_overdue_reservations()
     uow.commit()
-
-    assert len(expired_list) == 1
-    assert expired_list[0].reservation_id == res_overdue.reservation_id
+    assert [res.reservation_id for res in expired_list] == [res_overdue.reservation_id]
     assert res_overdue.status == "EXPIRED"
     assert available_public_vehicle.status == "AVAILABLE"
-
-    # Future reservation is unaffected
     assert res_active.status == "CONFIRMED"
     assert v2.status == "RESERVED"
 
@@ -460,3 +438,19 @@ def test_return_vehicle_damaged_triggers_maintenance(uow, seed_data, available_p
 
     assert available_public_vehicle.status == "MAINTENANCE"
     assert available_public_vehicle.current_hub_id == seed_data["hub_dorm"].hub_id
+
+
+def test_future_trip_cannot_create_immediate_hold(uow, seed_data, available_public_vehicle):
+    service = RentalService(uow)
+    student_id = seed_data["student"].user_id
+    trip = service.plan_trip(student_id, {
+        "origin_hub_id": seed_data["hub_metro"].hub_id,
+        "destination_hub_id": seed_data["hub_dorm"].hub_id,
+        "planned_departure": (utc_now() + timedelta(hours=1)).isoformat(),
+    })
+    with pytest.raises(AppError) as error:
+        service.reserve_vehicle(student_id, VehicleReservationCreate(
+            vehicle_id=available_public_vehicle.vehicle_id, trip_id=trip.trip_id,
+        ))
+    assert error.value.code == "TRIP_CONFLICT"
+    assert available_public_vehicle.status == "AVAILABLE"
