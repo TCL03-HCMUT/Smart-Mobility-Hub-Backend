@@ -58,7 +58,7 @@ def cancel_session(session_id: str, uow: UowDependency, principal: Principal):
 def start_session(session_id: str, uow: UowDependency, principal: Operator):
     uow.lock_operational_write()
     settle_due(uow)
-    record = ChargingService(uow).start(session_id)
+    record = ChargingService(uow).start(session_id, actor_id=principal.user_id)
     uow.advance_operational_revision()
     return record
 

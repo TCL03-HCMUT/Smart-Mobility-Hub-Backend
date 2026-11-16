@@ -4,10 +4,11 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import AppError, NotFoundError
 from app.core.utils import parse_utc, utc_now, utc_now_iso, uuid_id
-from app.models.entities import FleetParking, IncidentResolution, Rental, RentalActivity, RentalHoldContext, Trip, Vehicle, VehicleReservation
+from app.models.entities import FleetParking, IncidentResolution, Rental, RentalHoldContext, Trip, Vehicle, VehicleReservation
 from app.schemas.rental import HoldCreate
 from app.services.base import BaseService
 
+from app.services.operational_activity import record_activity
 from app.services.operational_guards import committed_task, open_vehicle_fault, pending_dispatch_vehicles
 from app.services.parking_allocator import ParkingAllocator
 from app.services.rental_battery import MINIMUM_RENTAL_BATTERY_PCT, battery_issue
@@ -161,7 +162,7 @@ class RentalService(BaseService):
         self.uow.session.add(RentalHoldContext(
             reservation_id=reservation.reservation_id, origin_hub_id=origin.hub_id, intended_hub_id=intended,
         ))
-        self._audit(student_id, "HOLD_CREATED", "hold", reservation.reservation_id)
+        record_activity(self.uow, student_id, "HOLD_CREATED", "hold", reservation.reservation_id)
         return reservation
 
     def cancel_reservation(self, reservation_id: str, student_id: str) -> VehicleReservation:
@@ -179,7 +180,7 @@ class RentalService(BaseService):
         if vehicle and vehicle.status == "RESERVED":
             vehicle.status = "AVAILABLE"
 
-        self._audit(student_id, "HOLD_CANCELLED", "hold", reservation_id)
+        record_activity(self.uow, student_id, "HOLD_CANCELLED", "hold", reservation_id)
         self.uow.session.flush()
         return reservation
 
@@ -224,7 +225,7 @@ class RentalService(BaseService):
             if trip and trip.status == "PLANNED":
                 trip.status = "IN_PROGRESS"
 
-        self._audit(student_id, "RENTAL_PICKED_UP", "rental", rental.rental_id)
+        record_activity(self.uow, student_id, "RENTAL_PICKED_UP", "rental", rental.rental_id)
         self.uow.session.flush()
         return rental
 
@@ -291,7 +292,7 @@ class RentalService(BaseService):
             if trip and trip.status == "IN_PROGRESS":
                 trip.status = "COMPLETED"
 
-        self._audit(student_id, "RENTAL_RETURNED", "rental", rental_id)
+        record_activity(self.uow, student_id, "RENTAL_RETURNED", "rental", rental_id)
         self.uow.session.flush()
         return rental
 
@@ -321,19 +322,12 @@ class RentalService(BaseService):
         vehicle = self.uow.vehicles.get_by_id(reservation.vehicle_id)
         if vehicle and vehicle.status == "RESERVED":
             vehicle.status = "AVAILABLE"
-        self._audit(reservation.student_id, "HOLD_EXPIRED", "hold", reservation.reservation_id, "Deadline reached.")
+        record_activity(self.uow, reservation.student_id, "HOLD_EXPIRED", "hold", reservation.reservation_id, "Deadline reached.")
 
     def _require_battery(self, vehicle, now):
         code = battery_issue(self.uow, vehicle, now)
         if code:
             raise AppError("Vehicle battery does not meet rental requirements.", 409, code=code)
-
-    def _audit(self, user_id, action, resource_type, resource_id, reason=None):
-        self.uow.session.add(RentalActivity(
-            operation_id=uuid_id(), actor_id=user_id, at=utc_now_iso(),
-            action=action, resource_type=resource_type, resource_id=resource_id,
-            outcome="SUCCESS", reason=reason,
-        ))
 
     def _reservation(self, reservation_id: str, student_id: str) -> VehicleReservation:
         """Verify existence and ownership of a vehicle reservation."""

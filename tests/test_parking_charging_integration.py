@@ -156,6 +156,18 @@ def test_charging_priority_fault_requeue_complete_and_stop(workspace):
     assert "need-by" in second.get(high).json()["reason"]
     assert second.post(f"{high}/start").status_code == 403
     assert operator.post(f"{high}/start").json()["status"] == "ACTIVE"
+    for client, expected_actors in (
+        (operator, ["operator-nam"]), (second, ["operator-nam"]), (first, []),
+    ):
+        activity = client.get(f"{API}/activity")
+        assert activity.status_code == 200, activity.text
+        actors = [
+            event["actor_id"] for event in activity.json()
+            if event["action"] == "CHARGE_STARTED"
+            and event["resource_type"] == "charging"
+            and event["resource_id"] == high_priority["session_id"]
+        ]
+        assert actors == expected_actors
     assert operator.post(f"{high}/complete").status_code == 409
     assert operator.post(f"{low}/start").status_code == 409
     # A fault after start releases the c1 assignment, preserves parking and returns the request to the queue.

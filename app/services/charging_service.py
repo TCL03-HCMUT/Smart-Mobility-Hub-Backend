@@ -75,7 +75,7 @@ class ChargingService:
         self.assign_priorities()
         return record
 
-    def start(self, session_id):
+    def start(self, session_id, *, actor_id: str):
         record = self.get(session_id)
         now = utc_now()
         if record.status != "SCHEDULED":
@@ -101,7 +101,7 @@ class ChargingService:
         vehicle.status = "CHARGING"
         record.status = "ACTIVE"
         record.reason = "Vehicle checked in and charging."
-        self._record(record, "CHARGE_STARTED")
+        record_activity(self.uow, actor_id, "CHARGE_STARTED", "charging", record.session_id, record.reason)
         return record
 
     def stop(self, session_id, interrupted=False):
