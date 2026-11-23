@@ -50,4 +50,6 @@ Demo accounts are `anh@demo.example` and `bao@demo.example` (students), and `nam
 
 For a repeatable demo, copy `.env.example` to `.env` (`cp .env.example .env` on macOS/Linux/PowerShell/Git Bash, or `copy .env.example .env` in Windows Command Prompt) and set `DEMO_CLOCK_UTC` before seeding and starting the server.
 
+For wall-clock demos, set `DEMO_TELEMETRY_SECONDS=60` in `.env` and restart the server. The existing operational worker republishes simulated battery readings for the seeded fleet; without a telemetry source, readings expire after 5 minutes and students cannot rent those vehicles. Set it to `0` when testing stale readings. Fixed-clock demos do not generate telemetry.
+
 Run `python -m pytest -q` inside the activated virtual environment for tests. See the [OpenAPI contract](docs/openapi.json).

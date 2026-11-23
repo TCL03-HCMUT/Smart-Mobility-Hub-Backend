@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     charging_duration_minutes: int = Field(20, gt=0)
     charging_target_pct: float = Field(80, gt=0, le=100)
     operational_tick_seconds: int = Field(5, ge=0)
+    demo_telemetry_seconds: int = Field(0, ge=0)
     simulation_step_minutes: int = Field(5, gt=0, le=60)
     simulation_baseline_rental_count: int = Field(2, ge=0, le=1000)
     demo_clock_utc: AwareDatetime | None = None
