@@ -12,7 +12,7 @@ from app.core.security import CSRF_COOKIE
 from app.core.utils import utc_now
 from app.database import Base
 from app.main import app
-from app.models.entities import SimulationRun
+from app.models.entities import ChargingPoint, HubResource, MobilityHub, SimulationRun
 from app.services.simulation_engine import DemandSimulationEngine
 
 API = "/api/v1"
@@ -147,11 +147,16 @@ def test_reject_invalid_or_unavailable_scenario_inputs(simulation_workspace):
     for payload in (
         {**METRO_SURGE, "scenario_type": "PARKING_SURGE"},
         {**METRO_SURGE, "horizon_minutes": 241},
-        {**METRO_SURGE, "hub_id": "north"},
         {**METRO_SURGE, "demand_count": True},
         {**METRO_SURGE, "charging_point_id": "metro-c1"},
     ):
         assert operator.post(RUNS, json=payload).status_code == 422
+    for kind in ("PARKING_CAPACITY", "CHARGING_DEMAND_SURGE"):
+        assert operator.post(RUNS, json={**METRO_SURGE, "scenario_type": kind, "demand_count": 0}).status_code == 422
+    fleet = {"scenario_type": "FLEET_IMBALANCE", "hub_id": "north", "horizon_minutes": 30}
+    assert operator.post(RUNS, json={**fleet, "direction": "SURGE", "vehicle_count": 2}).status_code == 422
+    assert operator.post(RUNS, json={**fleet, "direction": "SHORTAGE", "vehicle_count": 1001}).status_code == 422
+    assert operator.post(RUNS, json={**METRO_SURGE, "hub_id": "missing"}).status_code == 404
     fault = {"scenario_type": "CHARGER_FAULT", "hub_id": "north", "horizon_minutes": 30}
     assert operator.post(RUNS, json={**fault, "charging_point_id": "metro-c1"}).status_code == 404
     assert operator.post(f"{API}/incidents", json={
@@ -159,3 +164,80 @@ def test_reject_invalid_or_unavailable_scenario_inputs(simulation_workspace):
     }).status_code == 201
     assert operator.post(RUNS, json={**fault, "charging_point_id": "north-c1"}).status_code == 409
     assert operator.get(RUNS).json() == []
+
+
+@pytest.mark.parametrize(("payload", "metrics", "advice_type"), [
+    (
+        {**METRO_SURGE, "hub_id": "north"},
+        {"rental_requests": (2, 5), "unmet_rental_demand": (0, 3)},
+        "REDISTRIBUTE_VEHICLE",
+    ),
+    (
+        {"scenario_type": "PARKING_CAPACITY", "demand_count": 2},
+        {"parking_occupied_at_end": (2, 4), "parking_bookable_at_end": (2, 0), "parking_rejected": (0, 0)},
+        "REDIRECT_PARKING",
+    ),
+    (
+        {"scenario_type": "PARKING_CAPACITY", "demand_count": 3},
+        {"parking_occupied_at_end": (2, 4), "parking_bookable_at_end": (2, 0), "parking_rejected": (0, 1)},
+        "REDIRECT_PARKING",
+    ),
+    (
+        {"scenario_type": "CHARGING_DEMAND_SURGE", "demand_count": 3, "horizon_minutes": 40},
+        {"charging_capacity": (1, 1), "charging_requests": (0, 3),
+         "charges_completed": (0, 2), "charges_not_completed_at_horizon": (0, 1)},
+        "RESCHEDULE_CHARGING",
+    ),
+    (
+        {"scenario_type": "FLEET_IMBALANCE", "direction": "SHORTAGE", "vehicle_count": 3},
+        {"available_vehicles_at_start": (2, 0), "unmet_rental_demand": (0, 2)},
+        "REDISTRIBUTE_VEHICLE",
+    ),
+    (
+        {"scenario_type": "FLEET_IMBALANCE", "direction": "CONCENTRATION", "vehicle_count": 3},
+        {"available_vehicles_at_start": (2, 5), "available_vehicles_at_end": (0, 3),
+         "unmet_rental_demand": (0, 0)},
+        "MONITOR_FLEET",
+    ),
+], ids=["other-hub-rental", "exact-parking-capacity", "parking-overflow", "charging-surge",
+        "fleet-shortage", "fleet-concentration"])
+def test_scenario_exposes_projected_impact_without_changing_operations(
+    simulation_workspace, payload, metrics, advice_type,
+):
+    engine, (student, operator, _) = simulation_workspace
+    config = {"hub_id": "north", "horizon_minutes": 30, **payload}
+    assert student.post(RUNS, json=config).status_code == 403
+    before = operational_rows(engine)
+    outcomes = []
+    for _ in range(3):
+        response = operator.post(RUNS, json=config)
+        assert response.status_code == 201, response.text
+        run = response.json()
+        assert run["scenario_type"] == config["scenario_type"]
+        assert run["model_version"] == "demo-2"
+        assert kpis(run).items() >= metrics.items()
+        assert run["recommendations"][0]["type"] == advice_type
+        assert operator.get(f"{RUNS}/{run['run_id']}").json() == run
+        outcomes.append({key: value for key, value in run.items() if key != "run_id"})
+    assert outcomes[0] == outcomes[1] == outcomes[2]
+    assert operational_rows(engine) == before
+
+
+def test_partial_charging_point_failure_leaves_other_point_working(simulation_workspace):
+    engine, (_, operator, _) = simulation_workspace
+    with Session(engine) as session:
+        session.get(MobilityHub, "north").max_charging_capacity = 2
+        session.add(HubResource(
+            resource_id="north-c2", hub_id="north", code="C2", resource_type="CHARGING_POINT",
+        ))
+        session.flush()
+        session.add(ChargingPoint(resource_id="north-c2"))
+        session.commit()
+    before = operational_rows(engine)
+    result = operator.post(RUNS, json={
+        "scenario_type": "CHARGER_FAULT", "hub_id": "north",
+        "charging_point_id": "north-c1", "horizon_minutes": 30,
+    })
+    assert result.status_code == 201, result.text
+    assert kpis(result.json())["charging_capacity"] == (2, 1)
+    assert operational_rows(engine) == before

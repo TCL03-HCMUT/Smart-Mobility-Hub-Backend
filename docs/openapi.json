@@ -5498,14 +5498,26 @@
                     "$ref": "#/components/schemas/RentalDemandSurge"
                   },
                   {
+                    "$ref": "#/components/schemas/ParkingCapacity"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ChargingDemandSurge"
+                  },
+                  {
                     "$ref": "#/components/schemas/ChargerFault"
+                  },
+                  {
+                    "$ref": "#/components/schemas/FleetImbalance"
                   }
                 ],
                 "discriminator": {
                   "propertyName": "scenario_type",
                   "mapping": {
                     "RENTAL_DEMAND_SURGE": "#/components/schemas/RentalDemandSurge",
-                    "CHARGER_FAULT": "#/components/schemas/ChargerFault"
+                    "PARKING_CAPACITY": "#/components/schemas/ParkingCapacity",
+                    "CHARGING_DEMAND_SURGE": "#/components/schemas/ChargingDemandSurge",
+                    "CHARGER_FAULT": "#/components/schemas/ChargerFault",
+                    "FLEET_IMBALANCE": "#/components/schemas/FleetImbalance"
                   }
                 },
                 "title": "Payload"
@@ -5838,6 +5850,41 @@
         ],
         "title": "ChargerFault"
       },
+      "ChargingDemandSurge": {
+        "properties": {
+          "hub_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Hub Id"
+          },
+          "horizon_minutes": {
+            "type": "integer",
+            "maximum": 240.0,
+            "minimum": 1.0,
+            "title": "Horizon Minutes"
+          },
+          "scenario_type": {
+            "type": "string",
+            "const": "CHARGING_DEMAND_SURGE",
+            "title": "Scenario Type"
+          },
+          "demand_count": {
+            "type": "integer",
+            "maximum": 1000.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Demand Count"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "hub_id",
+          "horizon_minutes",
+          "scenario_type",
+          "demand_count"
+        ],
+        "title": "ChargingDemandSurge"
+      },
       "ChargingPointOut": {
         "properties": {
           "resource_id": {
@@ -6137,6 +6184,50 @@
           "error"
         ],
         "title": "ErrorEnvelope"
+      },
+      "FleetImbalance": {
+        "properties": {
+          "hub_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Hub Id"
+          },
+          "horizon_minutes": {
+            "type": "integer",
+            "maximum": 240.0,
+            "minimum": 1.0,
+            "title": "Horizon Minutes"
+          },
+          "scenario_type": {
+            "type": "string",
+            "const": "FLEET_IMBALANCE",
+            "title": "Scenario Type"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "SHORTAGE",
+              "CONCENTRATION"
+            ],
+            "title": "Direction"
+          },
+          "vehicle_count": {
+            "type": "integer",
+            "maximum": 1000.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Vehicle Count"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "hub_id",
+          "horizon_minutes",
+          "scenario_type",
+          "direction",
+          "vehicle_count"
+        ],
+        "title": "FleetImbalance"
       },
       "HoldCreate": {
         "properties": {
@@ -6620,6 +6711,41 @@
         ],
         "title": "OwnedVehicleOut"
       },
+      "ParkingCapacity": {
+        "properties": {
+          "hub_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Hub Id"
+          },
+          "horizon_minutes": {
+            "type": "integer",
+            "maximum": 240.0,
+            "minimum": 1.0,
+            "title": "Horizon Minutes"
+          },
+          "scenario_type": {
+            "type": "string",
+            "const": "PARKING_CAPACITY",
+            "title": "Scenario Type"
+          },
+          "demand_count": {
+            "type": "integer",
+            "maximum": 1000.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Demand Count"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "hub_id",
+          "horizon_minutes",
+          "scenario_type",
+          "demand_count"
+        ],
+        "title": "ParkingCapacity"
+      },
       "ParkingReservationCreate": {
         "properties": {
           "vehicle_id": {
@@ -6952,7 +7078,10 @@
             "enum": [
               "REDISTRIBUTE_VEHICLE",
               "MONITOR_DEMAND",
-              "RESTORE_CHARGER"
+              "RESTORE_CHARGER",
+              "REDIRECT_PARKING",
+              "RESCHEDULE_CHARGING",
+              "MONITOR_FLEET"
             ],
             "title": "Type"
           },
@@ -7044,7 +7173,10 @@
             "type": "string",
             "enum": [
               "RENTAL_DEMAND_SURGE",
-              "CHARGER_FAULT"
+              "PARKING_CAPACITY",
+              "CHARGING_DEMAND_SURGE",
+              "CHARGER_FAULT",
+              "FLEET_IMBALANCE"
             ],
             "title": "Scenario Type"
           },

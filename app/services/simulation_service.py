@@ -7,7 +7,10 @@ from app.core.config import get_settings
 from app.core.exceptions import AppError, NotFoundError
 from app.core.utils import parse_utc, utc_now, uuid_id
 from app.models.entities import ChargingPoint, ChargingRequest, SimulationRun
-from app.schemas.operations import ChargerFault, RentalDemandSurge, SimulationRunOut
+from app.schemas.operations import (
+    ChargerFault, ChargingDemandSurge, FleetImbalance, ParkingCapacity, RentalDemandSurge, SimulationCreate,
+    SimulationRunOut,
+)
 from app.services.charging_service import LIVE, ChargingService
 from app.services.parking_allocator import ParkingAllocator
 from app.services.parking_service import ParkingService
@@ -24,7 +27,7 @@ class SimulationService:
         self.uow = uow
         self.engine = engine or DemandSimulationEngine()
 
-    def run(self, user_id: str, payload: RentalDemandSurge | ChargerFault) -> SimulationRunOut:
+    def run(self, user_id: str, payload: SimulationCreate) -> SimulationRunOut:
         self.uow.begin_operational_read()
         snapshot = self._snapshot(payload)
         # The engine has no ORM references. End the SQLite read transaction before
@@ -76,44 +79,49 @@ class SimulationService:
             raise AppError("Choose an active hub.", 409, code="HUB_UNAVAILABLE")
         settings = get_settings()
         hubs, points, requests, charging_capacity = (), (), (), 0
-        if isinstance(payload, RentalDemandSurge):
-            if payload.hub_id != "metro":
-                raise AppError("The demo demand surge is modeled at Metro.", 422, code="SCENARIO_NOT_SUPPORTED")
-            hubs = self._rental_snapshot(hub, now)
+        if isinstance(payload, (RentalDemandSurge, FleetImbalance, ParkingCapacity)):
+            hubs = self._hub_snapshot(payload, now)
         else:
-            resource = self.uow.resources.get_by_id(payload.charging_point_id)
-            if (
-                not resource or resource.hub_id != hub.hub_id
-                or not self.uow.session.get(ChargingPoint, resource.resource_id)
-            ):
-                raise NotFoundError("Charging point", payload.charging_point_id)
+            if isinstance(payload, ChargerFault):
+                resource = self.uow.resources.get_by_id(payload.charging_point_id)
+                if (
+                    not resource or resource.hub_id != hub.hub_id
+                    or not self.uow.session.get(ChargingPoint, resource.resource_id)
+                ):
+                    raise NotFoundError("Charging point", payload.charging_point_id)
             points, requests = self._charging_snapshot(hub.hub_id, now)
             charging_capacity = hub.max_charging_capacity or 0
-            if payload.charging_point_id not in points:
+            if isinstance(payload, ChargerFault) and payload.charging_point_id not in points:
                 raise AppError("Choose a charging point that is working in the snapshot.",
                                409, code="CHARGING_POINT_UNAVAILABLE")
         return OperationalSnapshot(
             revision, now, hubs, points, charging_capacity, requests,
             settings.simulation_step_minutes, settings.simulation_baseline_rental_count,
+            settings.charging_duration_minutes if isinstance(payload, ChargingDemandSurge) else 0,
         )
 
-    def _rental_snapshot(self, target, now):
-        candidates = RentalService(self.uow).search_available_vehicles({}, now=now)
-        types = {vehicle.vehicle_type for vehicle in candidates}
-        allocator = ParkingAllocator(self.uow)
-        accepted = tuple(
-            vehicle_type for vehicle_type in sorted(types, key=lambda item: item or "")
-            if allocator.for_arrival(target, now, vehicle_type).bookable_now
+    def _hub_snapshot(self, payload, now):
+        candidates = (
+            [] if isinstance(payload, ParkingCapacity)
+            else RentalService(self.uow).search_available_vehicles({}, now=now)
         )
-        return tuple(
-            SimHub(
+        types = sorted({vehicle.vehicle_type for vehicle in candidates}, key=lambda item: item or "")
+        allocator = ParkingAllocator(self.uow)
+        result = []
+        for hub in sorted(self.uow.hubs.find(status="ACTIVE"), key=lambda item: item.hub_id):
+            parking = allocator.for_arrival(hub, now)
+            accepted = tuple(
+                vehicle_type for vehicle_type in types
+                if allocator.for_arrival(hub, now, vehicle_type).bookable_now
+            )
+            result.append(SimHub(
                 hub.hub_id,
                 tuple((vehicle.vehicle_id, vehicle.vehicle_type) for vehicle in candidates
                       if vehicle.current_hub_id == hub.hub_id),
-                accepted if hub.hub_id == target.hub_id else (),
-            )
-            for hub in sorted(self.uow.hubs.find(status="ACTIVE"), key=lambda item: item.hub_id)
-        )
+                accepted,
+                parking.capacity, parking.physical_free_now, parking.bookable_now,
+            ))
+        return tuple(result)
 
     def _charging_snapshot(self, hub_id, now):
         charging = ChargingService(self.uow)

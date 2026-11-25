@@ -96,7 +96,29 @@ class ChargerFault(SimulationInput):
     charging_point_id: str = Field(min_length=1)
 
 
-SimulationCreate = Annotated[Union[RentalDemandSurge, ChargerFault], Field(discriminator="scenario_type")]
+class ParkingCapacity(SimulationInput):
+    scenario_type: Literal["PARKING_CAPACITY"]
+    demand_count: int = Field(gt=0, le=1000, strict=True)
+
+
+class ChargingDemandSurge(SimulationInput):
+    scenario_type: Literal["CHARGING_DEMAND_SURGE"]
+    demand_count: int = Field(gt=0, le=1000, strict=True)
+
+
+class FleetImbalance(SimulationInput):
+    scenario_type: Literal["FLEET_IMBALANCE"]
+    direction: Literal["SHORTAGE", "CONCENTRATION"]
+    vehicle_count: int = Field(gt=0, le=1000, strict=True)
+
+
+SimulationType = Literal[
+    "RENTAL_DEMAND_SURGE", "PARKING_CAPACITY", "CHARGING_DEMAND_SURGE", "CHARGER_FAULT", "FLEET_IMBALANCE",
+]
+SimulationCreate = Annotated[
+    Union[RentalDemandSurge, ParkingCapacity, ChargingDemandSurge, ChargerFault, FleetImbalance],
+    Field(discriminator="scenario_type"),
+]
 
 
 class SimulationMetric(APIModel):
@@ -107,7 +129,10 @@ class SimulationMetric(APIModel):
 
 
 class SimulationAdvice(APIModel):
-    type: Literal["REDISTRIBUTE_VEHICLE", "MONITOR_DEMAND", "RESTORE_CHARGER"]
+    type: Literal[
+        "REDISTRIBUTE_VEHICLE", "MONITOR_DEMAND", "RESTORE_CHARGER",
+        "REDIRECT_PARKING", "RESCHEDULE_CHARGING", "MONITOR_FLEET",
+    ]
     reason: str
     vehicle_id: str | None = None
     from_hub_id: str | None = None
@@ -117,7 +142,7 @@ class SimulationAdvice(APIModel):
 class SimulationRunOut(APIModel):
     run_id: str
     status: Literal["COMPLETED"]
-    scenario_type: Literal["RENTAL_DEMAND_SURGE", "CHARGER_FAULT"]
+    scenario_type: SimulationType
     hub_id: str
     horizon_minutes: int
     snapshot_revision: str
